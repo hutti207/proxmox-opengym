@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Point this at YOUR repo (raw base URL, no trailing slash). It is what the
 # container's `update` command pulls ct/opengym.sh from later on.
-_CS_DEFAULT_URL="${_CS_DEFAULT_URL:-https://raw.githubusercontent.com/hutti207/pve-scripts/main}"
+_CS_DEFAULT_URL="${_CS_DEFAULT_URL:-https://raw.githubusercontent.com/hutti207/ProxmoxVE/main}"
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
