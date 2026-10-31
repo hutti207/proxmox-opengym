@@ -13,13 +13,14 @@ setting_up_container
 network_check
 update_os
 
-setup_go
 NODE_VERSION="22" setup_nodejs
 mkdir -p /opt/{wanderer,wanderer_data/pb_data,wanderer_data/meili_data,wanderer_data/plugins}
 MEILISEARCH_DB_PATH="/opt/wanderer_data/meili_data" setup_meilisearch
 fetch_and_deploy_gh_release "wanderer" "open-wanderer/wanderer" "tarball" "latest"
 mkdir -p /opt/wanderer/db/data
 [[ -e /opt/wanderer/db/data/plugins ]] || ln -sfn /opt/wanderer_data/plugins /opt/wanderer/db/data/plugins
+
+GO_VERSION="$(grep -m1 '^go ' /opt/wanderer/db/go.mod | awk '{print $2}')" setup_go
 
 msg_info "Installing wanderer (patience)"
 cd /opt/wanderer/db
@@ -32,7 +33,7 @@ msg_ok "Installed wanderer"
 
 msg_info "Installing wanderer plugins"
 for plugin in hammerhead komoot strava; do
-  fetch_and_deploy_gh_release "wanderer-plugin-${plugin}" "open-wanderer/wanderer" "prebuild" "latest" "/opt/wanderer_data/plugins" "wanderer-plugin-${plugin}.tar.gz" || msg_warn "Failed to install wanderer plugin: ${plugin}"
+  fetch_and_deploy_gh_release "wanderer-plugin-${plugin}" "open-wanderer/wanderer" "prebuild" "latest" "/opt/wanderer_data/plugins/${plugin}" "wanderer-plugin-${plugin}.tar.gz" || msg_warn "Failed to install wanderer plugin: ${plugin}"
 done
 msg_ok "Installed wanderer plugins"
 
@@ -48,9 +49,20 @@ PB_URL=${LOCAL_IP}:8090
 PUBLIC_POCKETBASE_URL=http://${LOCAL_IP}:8090
 PUBLIC_VALHALLA_URL=https://valhalla1.openstreetmap.de
 POCKETBASE_ENCRYPTION_KEY=${POCKETBASE_KEY}
+POCKETBASE_PROXY_SECRET=$(openssl rand -hex 32)
 PB_DB_LOCATION=/opt/wanderer_data/pb_data
 MEILI_DB_PATH=/opt/wanderer_data/meili_data
 EOF
+
+cat <<'EOF' >/usr/local/bin/wanderer-pb
+#!/usr/bin/env bash
+set -a
+source /opt/wanderer/.env
+set +a
+cd /opt/wanderer/db
+exec ./pocketbase "$@" --dir="$PB_DB_LOCATION"
+EOF
+chmod +x /usr/local/bin/wanderer-pb
 
 cat <<EOF >/etc/systemd/system/wanderer-pocketbase.service
 [Unit]

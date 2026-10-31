@@ -13,6 +13,12 @@ setting_up_container
 network_check
 update_os
 
+if is_debian && [[ "$(get_os_version_major)" -lt 13 ]]; then
+  msg_error "Immich needs Debian 13: its build dependencies and Intel runtime packages are not available on Debian 12."
+  exit 238
+fi
+
+RELEASE="v3.3.5"
 if lscpu | grep -q 'GenuineIntel'; then
   echo ""
   echo ""
@@ -24,7 +30,7 @@ if lscpu | grep -q 'GenuineIntel'; then
   echo " 2) **NEW** Intel OpenVINO CPU or iGPU"
   echo ""
 
-  read -r -p "${TAB3}Select machine-learning type [1]: " ML_TYPE
+  read -r -p "${TAB3}Select machine-learning type [1]: " ML_TYPE || true
   ML_TYPE="${ML_TYPE:-1}"
   if [[ "$ML_TYPE" == "2" ]]; then
     touch ~/.openvino
@@ -33,11 +39,11 @@ if lscpu | grep -q 'GenuineIntel'; then
       msg_info "Installing Intel OpenVINO dependencies"
       tmp_dir=$(mktemp -d)
       $STD pushd "$tmp_dir"
-      curl_with_retry "https://raw.githubusercontent.com/immich-app/immich/refs/heads/main/machine-learning/Dockerfile" "Dockerfile"
-      readarray -t INTEL_URLS < <(
-        sed -n "/intel-[igc|opencl]/p" ./Dockerfile | awk '{print $3}'
-        sed -n "/libigdgmm12/p" ./Dockerfile | awk '{print $3}'
-      )
+      INTEL_SRC="https://raw.githubusercontent.com/immich-app/immich/${RELEASE}/machine-learning"
+      curl -fsSL "${INTEL_SRC}/scripts/install-intel-runtime.sh" -o ./intel-runtime 2>/dev/null ||
+        curl_with_retry "${INTEL_SRC}/Dockerfile" "./intel-runtime"
+      readarray -t INTEL_URLS < <(grep -oE 'https://github\.com/intel/[^[:space:]]+\.deb' ./intel-runtime)
+      rm -f ./intel-runtime
       for url in "${INTEL_URLS[@]}"; do
         curl_with_retry "$url" "$(basename "$url")"
       done
@@ -83,6 +89,7 @@ $STD apt install --no-install-recommends -y \
   liblqr-1-0 \
   libltdl7 \
   libopenjp2-7 \
+  libopenjp2-7-dev \
   meson \
   ninja-build \
   pkg-config \
@@ -108,7 +115,7 @@ setup_deb822_repo \
   "https://repo.jellyfin.org/jellyfin_team.gpg.key" \
   "https://repo.jellyfin.org/debian" \
   "$(get_os_info codename)"
-$STD apt install -y jellyfin-ffmpeg7
+install_packages_with_retry jellyfin-ffmpeg7
 ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg
 ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe
 
@@ -122,12 +129,9 @@ if [[ "$CTTYPE" == "0" && -d /dev/dri ]]; then
 fi
 msg_ok "Dependencies Installed"
 
-msg_info "Installing Mise"
-curl -fSs https://mise.jdx.dev/gpg-key.pub | tee /etc/apt/keyrings/mise-archive-keyring.pub 1>/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mise-archive-keyring.pub arch=$(arch_resolve)] https://mise.jdx.dev/deb stable main" >/etc/apt/sources.list.d/mise.list
-$STD apt update
-$STD apt install -y mise
-msg_ok "Installed Mise"
+MISE_ARCH="x64"
+[[ "$(arch_resolve)" == "arm64" ]] && MISE_ARCH="arm64"
+fetch_and_deploy_gh_release "mise" "jdx/mise" "singlefile" "latest" "/usr/local/bin" "mise-v*-linux-${MISE_ARCH}"
 
 msg_info "Configuring Debian Testing Repo"
 if [[ -f /etc/apt/sources.list.d/debian.sources ]]; then
@@ -150,7 +154,7 @@ Package: *
 Pin:release a=testing
 Pin-Priority: 450
 EOF
-$STD apt update
+apt_update_safe
 msg_ok "Configured Debian Testing repo"
 msg_info "Installing packages from Debian Testing repo"
 $STD apt install -t testing --no-install-recommends -yqq libmimalloc3 libde265-dev
@@ -266,8 +270,7 @@ msg_ok "(2/6) Compiled jpegli"
 
 msg_info "(3/6) Compiling libheif"
 SOURCE=${SOURCE_DIR}/libheif
-LIBHEIF_REVISION="62f1b8c76ed4d8305071fdacbe74ef9717bacac5"
-# : "${LIBHEIF_REVISION:=$(jq -cr '.revision' $BASE_DIR/server/sources/libheif.json)}"
+LIBHEIF_REVISION="$(jq -cr '.revision' "$BASE_DIR"/server/sources/libheif.json)"
 $STD git clone https://github.com/strukturag/libheif.git "$SOURCE"
 cd "$SOURCE"
 $STD git reset --hard "$LIBHEIF_REVISION"
@@ -292,7 +295,7 @@ msg_ok "(3/6) Compiled libheif"
 
 msg_info "(4/6) Compiling libraw"
 SOURCE=${SOURCE_DIR}/libraw
-LIBRAW_REVISION="b860248a89d9082b8e0a1e202e516f46af9adb29"
+LIBRAW_REVISION="e419de08001de28ae6988ecb22df47e52b9c5eaa"
 # : "${LIBRAW_REVISION:=$(jq -cr '.revision' $BASE_DIR/server/sources/libraw.json)}"
 $STD git clone https://github.com/LibRaw/LibRaw.git "$SOURCE"
 cd "$SOURCE"
@@ -353,7 +356,7 @@ ML_DIR="${APP_DIR}/machine-learning"
 GEO_DIR="${INSTALL_DIR}/geodata"
 mkdir -p {"${APP_DIR}","${UPLOAD_DIR}","${GEO_DIR}","${INSTALL_DIR}"/cache}
 
-fetch_and_deploy_gh_release "Immich" "immich-app/immich" "tarball" "v3.1.0" "$SRC_DIR"
+fetch_and_deploy_gh_release "Immich" "immich-app/immich" "tarball" "${RELEASE}" "$SRC_DIR"
 PNPM_VERSION="$(jq -r '.packageManager | split("@")[1] | split("+")[0]' ${SRC_DIR}/package.json)"
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 NODE_VERSION="24" NODE_MODULE="corepack" setup_nodejs
@@ -370,11 +373,10 @@ export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 export CI=1
 
 # server build
-export SHARP_IGNORE_GLOBAL_LIBVIPS=true
 $STD pnpm --filter @immich/sdk --filter @immich/plugin-sdk --filter immich build
-unset SHARP_IGNORE_GLOBAL_LIBVIPS
-export SHARP_FORCE_GLOBAL_LIBVIPS=true
 $STD pnpm --filter immich --prod --no-optional deploy "$APP_DIR"
+export SHARP_FORCE_GLOBAL_LIBVIPS=true
+$STD pnpm --dir "$APP_DIR/node_modules/sharp" exec npm run build
 
 # Patch helmet.json: disable upgrade-insecure-requests for HTTP access
 if [[ -f "$APP_DIR/helmet.json" ]]; then
@@ -388,7 +390,6 @@ sed -i "s|^start|${APP_DIR}/bin/start|" "$APP_DIR"/bin/immich-admin
 cd "$SRC_DIR"
 echo "packageImportMethod: hardlink" >>./pnpm-workspace.yaml
 unset SHARP_FORCE_GLOBAL_LIBVIPS
-export SHARP_IGNORE_GLOBAL_LIBVIPS=true
 $STD pnpm --filter @immich/sdk --filter immich-web --filter @immich/cli build
 $STD pnpm --filter @immich/cli --prod --no-optional deploy "$APP_DIR"/cli
 cp -a web/build "$APP_DIR"/www
@@ -396,6 +397,7 @@ cp LICENSE "$APP_DIR"
 cd "$SRC_DIR"
 export MISE_TRUSTED_CONFIG_PATHS="$SRC_DIR"/mise.toml
 export MISE_DISABLE_TOOLS=github:jellyfin/jellyfin-ffmpeg
+export MISE_LOCKFILE_MODE=merge MISE_LOCKFILE_PLATFORMS="linux-$(arch_resolve x64 arm64)"
 mise_ok=0
 for i in 1 2 3; do
   $STD mise install && {
@@ -432,7 +434,6 @@ chown immich:immich "$INSTALL_DIR"
 find "$INSTALL_DIR" -maxdepth 1 -mindepth 1 ! -name upload -exec chown -R immich:immich {} +
 chown immich:immich "$UPLOAD_DIR" 2>/dev/null || true
 export VIRTUAL_ENV="${ML_DIR}/ml-venv"
-export UV_HTTP_TIMEOUT=300
 if [[ -f ~/.openvino ]]; then
   ML_PYTHON="python3.13"
   msg_info "Pre-installing Python ${ML_PYTHON} for machine-learning"
@@ -443,13 +444,16 @@ if [[ -f ~/.openvino ]]; then
   msg_ok "Pre-installed Python ${ML_PYTHON}"
   msg_info "Installing Intel OpenVINO machine-learning"
   for attempt in $(seq 1 3); do
-    $STD sudo --preserve-env=VIRTUAL_ENV,UV_HTTP_TIMEOUT -Pnu immich uv sync --extra openvino --no-dev --active --link-mode copy -n -p "${ML_PYTHON}" --managed-python && break
-    [[ $attempt -lt 3 ]] && msg_warn "uv sync attempt $attempt failed, retrying..." && sleep 10
+    $STD sudo --preserve-env=VIRTUAL_ENV,UV_HTTP_TIMEOUT,UV_CONCURRENT_DOWNLOADS,UV_CONCURRENT_BUILDS,UV_CONCURRENT_INSTALLS -Pnu immich uv sync --extra openvino --no-dev --active --link-mode copy -n -p "${ML_PYTHON}" --managed-python && break
+    [[ $attempt -eq 3 ]] && { msg_error "uv sync failed three times, the machine-learning environment was not built"; exit 1; }
+    # Parallel fetches can trip DNS rate limits (AdGuard, Pi-hole); retry one at a time.
+    export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1
+    msg_warn "uv sync attempt $attempt failed, retrying one download at a time..." && sleep 10
   done
   patchelf --clear-execstack "${VIRTUAL_ENV}/lib/python3.13/site-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-313-$(arch_resolve "x86_64" "aarch64")-linux-gnu.so"
   msg_ok "Installed Intel OpenVINO machine-learning"
 else
-  ML_PYTHON="python3.11"
+  ML_PYTHON="python3.13"
   msg_info "Pre-installing Python ${ML_PYTHON} for machine-learning"
   for attempt in $(seq 1 3); do
     $STD sudo --preserve-env=VIRTUAL_ENV -Pnu immich uv python install "${ML_PYTHON}" && break
@@ -458,8 +462,11 @@ else
   msg_ok "Pre-installed Python ${ML_PYTHON}"
   msg_info "Installing machine-learning"
   for attempt in $(seq 1 3); do
-    $STD sudo --preserve-env=VIRTUAL_ENV,UV_HTTP_TIMEOUT -Pnu immich uv sync --extra cpu --no-dev --active --link-mode copy -n -p "${ML_PYTHON}" --managed-python && break
-    [[ $attempt -lt 3 ]] && msg_warn "uv sync attempt $attempt failed, retrying..." && sleep 10
+    $STD sudo --preserve-env=VIRTUAL_ENV,UV_HTTP_TIMEOUT,UV_CONCURRENT_DOWNLOADS,UV_CONCURRENT_BUILDS,UV_CONCURRENT_INSTALLS -Pnu immich uv sync --extra cpu --no-dev --active --link-mode copy -n -p "${ML_PYTHON}" --managed-python && break
+    [[ $attempt -eq 3 ]] && { msg_error "uv sync failed three times, the machine-learning environment was not built"; exit 1; }
+    # Parallel fetches can trip DNS rate limits (AdGuard, Pi-hole); retry one at a time.
+    export UV_CONCURRENT_DOWNLOADS=1 UV_CONCURRENT_BUILDS=1 UV_CONCURRENT_INSTALLS=1
+    msg_warn "uv sync attempt $attempt failed, retrying one download at a time..." && sleep 10
   done
   msg_ok "Installed machine-learning"
 fi
@@ -490,25 +497,12 @@ ln -s "$GEO_DIR" "$APP_DIR"
 msg_ok "Installed GeoNames data"
 
 # MickLesk temporary patch for HEIC thumbnail gen
-msg_info "Patching media.repository.js"
 MEDIA_REPO_JS="/opt/immich/app/dist/repositories/media.repository.js"
-if [[ -f "$MEDIA_REPO_JS" ]]; then
-  python3 - <<'PY'
-from pathlib import Path
-p = Path('/opt/immich/app/dist/repositories/media.repository.js')
-s = p.read_text()
-old = "(0, sharp_1.default)(input).metadata()"
-new = "(0, sharp_1.default)(input, { unlimited: true, limitInputPixels: false }).metadata()"
-if new in s:
-    print('hotfix already there')
-elif old in s:
-    p.write_text(s.replace(old, new, 1))
-    print('hotfix applied')
-else:
-    print('pattern not found, skipped')
-PY
+if grep -qF "(0, sharp_1.default)(input).metadata()" "$MEDIA_REPO_JS" 2>/dev/null; then
+  msg_info "Patching media.repository.js"
+  sed -i '0,/(0, sharp_1\.default)(input)\.metadata()/s//(0, sharp_1.default)(input, { unlimited: true, limitInputPixels: false }).metadata()/' "$MEDIA_REPO_JS"
+  msg_ok "Patched media.repository.js"
 fi
-msg_ok "Patched media.repository.js"
 
 mkdir -p /var/log/immich
 touch /var/log/immich/{web.log,ml.log}
@@ -539,6 +533,7 @@ MACHINE_LEARNING_CACHE_FOLDER=${INSTALL_DIR}/cache
 ## - inference speed while reducing accuracy
 ## - Default is FP32
 # MACHINE_LEARNING_OPENVINO_PRECISION=FP16
+MACHINE_LEARNING_MODEL_REVISION=v2
 
 IMMICH_MEDIA_LOCATION=${UPLOAD_DIR}
 EOF

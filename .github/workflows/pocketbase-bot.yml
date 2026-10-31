@@ -19,24 +19,25 @@ jobs:
     steps:
       - name: Execute PocketBase bot command
         env:
-          POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
-          POCKETBASE_COLLECTION: ${{ secrets.POCKETBASE_COLLECTION }}
+          POCKETBASE_URL: ${{ vars.POCKETBASE_URL }}
+          POCKETBASE_COLLECTION: ${{ vars.POCKETBASE_COLLECTION }}
           POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
           POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_ID: ${{ github.event.comment.id }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request && 'true' || 'false' }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           ACTOR: ${{ github.event.comment.user.login }}
           ACTOR_ASSOCIATION: ${{ github.event.comment.author_association }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
-          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          REVALIDATE_SECRET: ${{ secrets.FRONTEND_INGEST_SECRET }}
           # Screenshot attaching is delegated to the frontend, which owns the
           # fetching and validation. Without this the subcommand says so rather
           # than failing halfway.
-          SCREENSHOT_IMPORT_SECRET: ${{ secrets.SCREENSHOT_IMPORT_SECRET }}
+          SCREENSHOT_IMPORT_SECRET: ${{ secrets.FRONTEND_INGEST_SECRET }}
         run: |
           node << 'ENDSCRIPT'
           (async function () {
@@ -84,6 +85,7 @@ jobs:
             const owner = process.env.REPO_OWNER;
             const repo = process.env.REPO_NAME;
             const issueNumber = parseInt(process.env.ISSUE_NUMBER, 10);
+            const isPrComment = process.env.IS_PR_COMMENT === 'true';
             const commentId = parseInt(process.env.COMMENT_ID, 10);
             const actor = process.env.ACTOR;
 
@@ -216,11 +218,22 @@ jobs:
 
               const prTitle = 'chore(ct): sync ' + slugValue + ' defaults with PocketBase';
               const prBody =
-                '## Summary\n' +
-                '- Sync default CT variables for `' + slugValue + '` after `/pocketbase` update.\n' +
-                '- Updated vars: `' + updateResult.updatedVars.join('`, `') + '`.\n\n' +
-                '## Source\n' +
-                '- Triggered by @' + actor + ' via PocketBase bot.\n';
+                '## ✍️ Description\n\n' +
+                'Sync of the default CT variables for `' + slugValue + '` after a `/pocketbase` update by @' + actor + '.\n\n' +
+                'Updated: `' + updateResult.updatedVars.join('`, `') + '`\n\n' +
+                '## 🔗 Related Issue\n\n' +
+                (isPrComment ? 'Triggered from #' : 'Fixes #') + issueNumber + '\n\n' +
+                '## ✅ Prerequisites (**X** in brackets)\n\n' +
+                '- [x] **Self-review completed** – Code follows project standards.\n' +
+                '- [ ] **Tested thoroughly** – Changes work as expected.\n' +
+                '- [x] **No security risks** – No hardcoded secrets, unnecessary privilege escalations, or permission issues.\n\n' +
+                '**Tested on:** not tested — generated from the PocketBase record, only `var_` defaults changed.\n\n' +
+                '---\n\n' +
+                '## 🤖 AI Assistance (**X** in brackets)\n\n' +
+                '- [x] **No AI used** – Scripts were written without AI assistance.\n\n' +
+                '---\n\n' +
+                '## 🛠️ Type of Change (**X** in brackets)\n\n' +
+                '- [x] 🐞 **Bug fix** – Resolves an issue without breaking functionality.\n';
               const createPrRes = await ghRequest('/repos/' + owner + '/' + repo + '/pulls', 'POST', {
                 title: prTitle,
                 body: prBody,
@@ -330,12 +343,16 @@ jobs:
               '`cpu` `ram` `hdd` `os` `version` also work without `method` — they go to the\n' +
               'default install method, e.g. `/pocketbase <slug> hdd=25`\n\n' +
               '**Editable fields:** `name` `description` `logo` `documentation` `website` `project_url` `repository` ' +
+              '`oidc_url` `license` ' +
               '`config_path` `port` `default_user` `default_passwd` ' +
               '`updateable` `privileged` `is_dev` `has_arm` ' +
               '`architectures` (amd64,arm64) `platforms` (pve,incus) ' +
               '`execute_in` (pve,lxc,pbs,vm,pmg,pdm) `categories` (names or ids) ' +
               '`type` (ct, vm, addon, …) ' +
-              '`is_disabled` `disable_message` `is_deleted` `deleted_message`\n\n' +
+              '`is_disabled` `disable_message` `is_deleted` `deleted_message` ' +
+              '`pin_reason` `last_update_commit`\n\n' +
+              'The `var_` names from the ct scripts work too: `var_cpu` `var_ram` `var_disk`\n' +
+              '`var_os` `var_version` `var_port` `var_tags` `var_unprivileged`\n\n' +
               '**Screenshots:**\n' +
               '```\n' +
               '/pocketbase <slug> screenshot https://example.com/one.png https://example.com/two.png\n' +
@@ -399,6 +416,14 @@ jobs:
 
             // ── Shared helpers ─────────────────────────────────────────────────
 
+            // The ct scripts name these var_cpu/var_ram/var_disk, and that is what
+            // people type. Accept them for the PocketBase keys.
+            const KEY_ALIASES = {
+              var_cpu: 'cpu', var_ram: 'ram', var_disk: 'hdd', var_hdd: 'hdd',
+              var_os: 'os', var_version: 'version', var_unprivileged: 'unprivileged',
+              var_port: 'port', var_tags: 'tags', disk: 'hdd', memory: 'ram',
+            };
+
             // Key=value parser: handles unquoted and "quoted" values
             function parseKVPairs(str) {
               const fields = {};
@@ -426,7 +451,7 @@ jobs:
                   while (pos < str.length && !/\s/.test(str[pos])) pos++;
                   value = str.substring(valStart, pos);
                 }
-                fields[key] = value;
+                fields[KEY_ALIASES[key.toLowerCase()] || key] = value;
               }
               return fields;
             }
@@ -520,6 +545,7 @@ jobs:
               out.push('- **Port:** ' + (record.port != null ? '`' + record.port + '`' : '—'));
               out.push('- **Updateable:** ' + (record.updateable ? 'Yes' : 'No'));
               out.push('- **Privileged:** ' + (record.privileged ? 'Yes' : 'No'));
+              out.push('- **License:** ' + (record.license || '—'));
               out.push('- **Architectures:** ' + ((record.architectures || []).join(', ') || 'amd64'));
               out.push('- **Platforms:** ' + ((record.platforms || []).join(', ') || 'pve'));
               if (record.is_dev) out.push('- **Dev:** Yes');
@@ -530,6 +556,7 @@ jobs:
               out.push('**Links:**');
               out.push('- **Website:** ' + (record.website || '—'));
               out.push('- **Docs:** ' + (record.documentation || '—'));
+              out.push('- **OIDC docs:** ' + (record.oidc_url || '—'));
               out.push('- **Logo:** ' + (record.logo ? '[link](' + record.logo + ')' : '—'));
               out.push('- **GitHub:** ' + (record.github || '—'));
               if (record.config_path) out.push('- **Config:** `' + record.config_path + '`');
@@ -961,6 +988,8 @@ jobs:
                 logo:             'string',
                 documentation:    'string',
                 website:          'string',
+                oidc_url:         'string',
+                license:          'string',
                 project_url:      'string',
                 repository:       'string',
                 config_path:      'string',
@@ -982,6 +1011,8 @@ jobs:
                 disable_message:  'string',
                 is_deleted:       'boolean',
                 deleted_message:  'string',
+                pin_reason:       'string',
+                last_update_commit: 'string',
               };
 
               const parsedFields = parseKVPairs(rest);

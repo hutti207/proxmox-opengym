@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -35,7 +36,18 @@ function update_script() {
     systemctl stop suggestarr
     msg_ok "Stopped Service"
 
+    mkdir -p /opt/suggestarr_data
+    if [[ -d /opt/suggestarr/config/config_files && ! -L /opt/suggestarr/config/config_files ]]; then
+      msg_info "Migrating Configuration"
+      cp -an /opt/suggestarr/config/config_files/. /opt/suggestarr_data/
+      msg_ok "Migrated Configuration to /opt/suggestarr_data"
+    fi
+
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "suggestarr" "giuseppe99barchetta/SuggestArr" "tarball"
+
+    mkdir -p /opt/suggestarr/config
+    rm -rf /opt/suggestarr/config/config_files
+    ln -sfn /opt/suggestarr_data /opt/suggestarr/config/config_files
 
     msg_info "Building Frontend"
     cd /opt/suggestarr/client

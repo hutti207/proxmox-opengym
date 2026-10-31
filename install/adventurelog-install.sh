@@ -30,10 +30,10 @@ PG_DB_NAME="adventurelog_db" PG_DB_USER="adventurelog_user" PG_DB_EXTENSIONS="po
 fetch_and_deploy_gh_release "adventurelog" "seanmorley15/adventurelog" "tarball"
 
 msg_info "Installing AdventureLog (Patience)"
-SECRET_KEY="$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | cut -c1-32)"
+SECRET_KEY="$(random_password 32)"
 echo "AdventureLog Secret: $SECRET_KEY" >>~/adventurelog.creds
 DJANGO_ADMIN_USER="djangoadmin"
-DJANGO_ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | cut -c1-13)"
+DJANGO_ADMIN_PASS="$(random_password 13)"
 cat <<EOF >/opt/adventurelog/backend/server/.env
 PGHOST='localhost'
 PGDATABASE='${PG_DB_NAME}'
@@ -62,7 +62,6 @@ $STD uv venv --clear /opt/adventurelog/backend/server/.venv
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m ensurepip --upgrade
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m pip install --upgrade pip
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m pip install -r requirements.txt
-$STD /opt/adventurelog/backend/server/.venv/bin/python -m pip install 'djangorestframework<3.15'
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m manage collectstatic --noinput
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m manage migrate
 $STD /opt/adventurelog/backend/server/.venv/bin/python -m manage download-countries

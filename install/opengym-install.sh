@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # Copyright (c) 2021-2026 community-scripts ORG
-# Author: Hutti
+# Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Source: https://github.com/arvids-unavailable/openGym
+# Source: https://github.com/DuarteSantos8/openGym
 
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
@@ -13,136 +13,135 @@ setting_up_container
 network_check
 update_os
 
-# ─── Settings ────────────────────────────────────────────────────────────────
-OG_REPO="https://github.com/arvids-unavailable/openGym"
-OG_DIR="/opt/opengym"
-OG_DATA="/opt/opengym-data"
-OG_PORT="80"
-
 msg_info "Installing Dependencies"
-$STD apt install -y git nginx
+$STD apt install -y nginx
 msg_ok "Installed Dependencies"
 
 NODE_VERSION="22" setup_nodejs
+fetch_and_deploy_gh_release "opengym" "DuarteSantos8/openGym" "tarball" "latest" "/opt/opengym" "" "v"
 
-msg_info "Fetching openGym (~150 MB, includes 1324 exercise images and GIFs)"
-$STD git clone --depth 1 "$OG_REPO" "$OG_DIR"
-# The repo ships a demo data/ folder containing a COMMITTED session secret and
-# VAPID keys. Using them would sign every session cookie with a publicly known
-# key, so it goes and real data lives outside the git tree instead.
-rm -rf "${OG_DIR}/data"
-mkdir -p "$OG_DATA"
-chmod 700 "$OG_DATA"
-msg_ok "Fetched openGym"
+msg_info "Building openGym"
+cd /opt/opengym/api
+$STD npm ci --omit=dev --omit=optional
+cd /opt/opengym/frontend
+# Like upstream's web/Dockerfile: skips sharp's libvips download, which only draws the mobile app icons
+$STD npm ci --ignore-scripts
+$STD npm run build
+rm -rf /opt/opengym/frontend/node_modules ~/.npm
+msg_ok "Built openGym"
 
 msg_info "Configuring openGym"
-LOCAL_IP="$(hostname -I | awk '{print $1}')"
-cat <<EOF >"${OG_DIR}/.env"
-# openGym configuration - run "systemctl restart opengym" after changes.
-#
-# Passkeys (WebAuthn) only work over HTTPS or on http://localhost. Over
-# http://<LAN-IP> the browser will not offer a passkey at all - guest mode
-# still works. Behind a reverse proxy with a real hostname, set:
-#   RP_ID=gym.example.com
-#   ORIGIN=https://gym.example.com
+mkdir -p /opt/opengym_data
+cat <<EOF >/opt/opengym_data/.env
+PORT=3000
+DATA_DIR=/opt/opengym_data
+RP_NAME=openGym
+# Passkeys need HTTPS on a hostname. Behind a reverse proxy set both to the address in the browser,
+# e.g. RP_ID=gym.example.com and ORIGIN=https://gym.example.com, then: systemctl restart opengym
 RP_ID=${LOCAL_IP}
 ORIGIN=http://${LOCAL_IP}
-RP_NAME=openGym
-
-PORT=3000
-DATA_DIR=${OG_DATA}
-SESSION_DAYS=90
-
-# Comma-separated user ids that get the admin dashboard (empty = no admin)
-#ADMIN_UIDS=
-# Require an invite code to create a profile
-#INVITE_ONLY=false
+PASSWORD_LOGIN=1
+FIRST_USER_ADMIN=1
 EOF
-chmod 600 "${OG_DIR}/.env"
+chmod 600 /opt/opengym_data/.env
 msg_ok "Configured openGym"
 
-msg_info "Building Frontend (this takes a few minutes)"
-cd "${OG_DIR}/frontend"
-$STD npm ci
-$STD npm run build
-# ~220 MB of build-only deps; npm ci reinstalls them on every update anyway
-rm -rf "${OG_DIR}/frontend/node_modules"
-msg_ok "Built Frontend"
-
-msg_info "Installing API"
-cd "${OG_DIR}/api"
-$STD npm ci --omit=dev
-msg_ok "Installed API"
-
-msg_info "Creating Service"
+msg_info "Creating openGym Service"
 cat <<EOF >/etc/systemd/system/opengym.service
 [Unit]
 Description=openGym API
-After=network-online.target
-Wants=network-online.target
+After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=${OG_DIR}/api
-EnvironmentFile=${OG_DIR}/.env
+User=root
+WorkingDirectory=/opt/opengym/api
+EnvironmentFile=/opt/opengym_data/.env
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node server.js
-Restart=always
+Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 systemctl enable -q --now opengym
-msg_ok "Created Service"
+msg_ok "Created openGym Service"
 
-msg_info "Configuring nginx"
-rm -f /etc/nginx/sites-enabled/default
-cat <<EOF >/etc/nginx/sites-available/opengym.conf
-# openGym - serves the built app AND proxies /api to the backend, so the whole
-# app lives on ONE origin (required for WebAuthn / passkeys).
+msg_info "Configuring Nginx"
+cat <<'EOF' >/etc/nginx/sites-available/opengym
 server {
-    listen ${OG_PORT};
-    listen [::]:${OG_PORT};
+    listen 80 default_server;
     server_name _;
-
-    root ${OG_DIR}/frontend/dist;
+    root /opt/opengym/frontend/dist;
     index index.html;
+    absolute_redirect off;
 
-    # State sync and history imports (FitNotes / Strong / Hevy / Apple Health)
-    # post up to 5 MB; nginx's 1 MB default would reject them.
-    client_max_body_size 10M;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
 
-    # ^~ on the three alias/proxy blocks: without it the regex block further
-    # down wins and these get served from root instead.
     location ^~ /api/ {
+        client_max_body_size 5m;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
 
-    location ^~ /img/ {
-        alias ${OG_DIR}/media/img/;
-        expires 30d;
-        add_header Cache-Control "public, max-age=2592000, immutable";
+    location ^~ /api/media/ {
+        client_max_body_size 48m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
     }
 
-    location ^~ /gif/ {
-        alias ${OG_DIR}/media/gif/;
-        expires 30d;
-        add_header Cache-Control "public, max-age=2592000, immutable";
-    }
-
-    # SPA fallback
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files $uri $uri/ @root;
     }
 
-    # App shell: always revalidate so updates show up immediately
-    location ~* \.(js|css|json|html)\$ {
+    location @root {
+        return 302 /$is_args$args;
+    }
+
+    location ~* \.(js|css|json|html)$ {
         add_header Cache-Control "no-cache, must-revalidate";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    }
+
+    location ^~ /exercise-media/ {
+        alias /opt/opengym/catalogue/media/;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    }
+
+    location ~* \.(png|jpg|jpeg|gif|ico|svg|woff|woff2|webp|avif|mp4)$ {
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
     }
 
     gzip on;
@@ -151,14 +150,8 @@ server {
     gzip_min_length 1024;
 }
 EOF
-ln -sf /etc/nginx/sites-available/opengym.conf /etc/nginx/sites-enabled/opengym.conf
-$STD nginx -t
-systemctl restart nginx
-msg_ok "Configured nginx"
-
-msg_info "Saving Version"
-git -C "$OG_DIR" rev-parse HEAD >/opt/opengym_version.txt
-msg_ok "Saved Version"
+nginx_enable_site "opengym"
+msg_ok "Configured Nginx"
 
 motd_ssh
 customize

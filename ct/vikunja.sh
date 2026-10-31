@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (Canbiz) | Co-Author: CrazyWolf13
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -44,6 +45,13 @@ function update_script() {
 
     read -rp "Acknowledge and continue? (y): " -t 30 CONFIRM2 || exit 254
     [[ "$CONFIRM2" =~ ^[yY]$ ]] || exit 0
+  fi
+
+  if [[ $(grep -c '^service:' /etc/vikunja/config.yml || true) -gt 1 ]]; then
+    msg_info "Merging duplicate service section in config.yml"
+    sed -i '0,/^service:/!{/^service:/d}' /etc/vikunja/config.yml
+    systemctl restart vikunja
+    msg_ok "Merged duplicate service section in config.yml"
   fi
 
   if check_for_gh_release "vikunja" "go-vikunja/vikunja"; then

@@ -17,7 +17,7 @@ msg_info "Installing Dependencies"
 $STD apt install -y build-essential
 msg_ok "Installed Dependencies"
 
-UV_PYTHON="3.12" setup_uv
+PYTHON_VERSION="3.12" setup_uv
 NODE_VERSION="22" setup_nodejs
 
 fetch_and_deploy_gh_release "suggestarr" "giuseppe99barchetta/SuggestArr" "tarball"
@@ -38,7 +38,9 @@ $STD uv pip install --python /opt/suggestarr/.venv -r /opt/suggestarr/api_servic
 msg_ok "Set up Python Environment"
 
 msg_info "Configuring SuggestArr"
-mkdir -p /opt/suggestarr_data
+mkdir -p /opt/suggestarr_data /opt/suggestarr/config
+rm -rf /opt/suggestarr/config/config_files
+ln -sfn /opt/suggestarr_data /opt/suggestarr/config/config_files
 cat <<EOF >/opt/suggestarr.env
 SUGGESTARR_PORT=5000
 LOG_LEVEL=info

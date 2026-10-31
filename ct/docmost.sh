@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -37,9 +38,9 @@ function update_script() {
     systemctl stop docmost
     msg_ok "Stopped Service"
 
-    create_backup /opt/docmost/.env /opt/docmost/data
+    create_backup /opt/docmost/.env
     
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "docmost" "docmost/docmost" "tarball"
+    CLEAN_INSTALL=1 CLEAN_INSTALL_KEEP="data" fetch_and_deploy_gh_release "docmost" "docmost/docmost" "tarball"
 
     restore_backup
 
@@ -55,6 +56,7 @@ function update_script() {
 
     msg_info "Configuring Docmost"
     cd /opt/docmost
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
     $STD pnpm install --force
     $STD pnpm build
     msg_ok "Configured Docmost"
