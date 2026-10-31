@@ -42,18 +42,31 @@ function update_script() {
     # Containers set up by this fork's first script ran a git checkout of the
     # arvids-unavailable/openGym copy: .env inside /opt/opengym, data in
     # /opt/opengym-data. CLEAN_INSTALL wipes /opt/opengym, so move config and data
-    # to the layout of the current install script first.
-    if [[ -f /opt/opengym/.env && ! -f /opt/opengym_data/.env ]]; then
+    # to the layout of the current install script first. Keyed on the old data
+    # dir, not the old .env: an update run before this step existed already
+    # wiped /opt/opengym, .env included, and left the service pointing at it.
+    if [[ -d /opt/opengym-data && ! -f /opt/opengym_data/.env ]]; then
       msg_info "Migrating openGym to the new layout"
-      tar -czf "/opt/opengym-migration-backup-$(date +%F_%H%M).tar.gz" -C /opt opengym-data opengym/.env
+      old_env=""
+      for f in /opt/opengym/.env /opt/opengym.env.bak; do
+        [[ -f "$f" ]] && old_env="$f" && break
+      done
+      tar -czf "/opt/opengym-migration-backup-$(date +%F_%H%M).tar.gz" -C / opt/opengym-data ${old_env:+"${old_env#/}"}
       mkdir -p /opt/opengym_data
       cp -a /opt/opengym-data/. /opt/opengym_data/
       {
         echo "PORT=3000"
         echo "DATA_DIR=/opt/opengym_data"
-        grep -Ev '^[[:space:]]*(#|$)|^(PORT|DATA_DIR)=' /opt/opengym/.env || true
-        grep -q '^PASSWORD_LOGIN=' /opt/opengym/.env || echo "PASSWORD_LOGIN=1"
-        grep -q '^FIRST_USER_ADMIN=' /opt/opengym/.env || echo "FIRST_USER_ADMIN=1"
+        if [[ -n "$old_env" ]]; then
+          grep -Ev '^[[:space:]]*(#|$)|^(PORT|DATA_DIR)=' "$old_env" || true
+        else
+          ip_addr="${LOCAL_IP:-$(hostname -I | awk '{print $1}')}"
+          echo "RP_NAME=openGym"
+          echo "RP_ID=${ip_addr}"
+          echo "ORIGIN=http://${ip_addr}"
+        fi
+        grep -qs '^PASSWORD_LOGIN=' "${old_env:-/dev/null}" || echo "PASSWORD_LOGIN=1"
+        grep -qs '^FIRST_USER_ADMIN=' "${old_env:-/dev/null}" || echo "FIRST_USER_ADMIN=1"
       } >/opt/opengym_data/.env
       chmod 600 /opt/opengym_data/.env
       cat <<EOF >/etc/systemd/system/opengym.service
