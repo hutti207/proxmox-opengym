@@ -39,6 +39,129 @@ function update_script() {
     systemctl stop nginx opengym
     msg_ok "Stopped openGym"
 
+    # Containers set up by this fork's first script ran a git checkout of the
+    # arvids-unavailable/openGym copy: .env inside /opt/opengym, data in
+    # /opt/opengym-data. CLEAN_INSTALL wipes /opt/opengym, so move config and data
+    # to the layout of the current install script first.
+    if [[ -f /opt/opengym/.env && ! -f /opt/opengym_data/.env ]]; then
+      msg_info "Migrating openGym to the new layout"
+      tar -czf "/opt/opengym-migration-backup-$(date +%F_%H%M).tar.gz" -C /opt opengym-data opengym/.env
+      mkdir -p /opt/opengym_data
+      cp -a /opt/opengym-data/. /opt/opengym_data/
+      {
+        echo "PORT=3000"
+        echo "DATA_DIR=/opt/opengym_data"
+        grep -Ev '^[[:space:]]*(#|$)|^(PORT|DATA_DIR)=' /opt/opengym/.env || true
+        grep -q '^PASSWORD_LOGIN=' /opt/opengym/.env || echo "PASSWORD_LOGIN=1"
+        grep -q '^FIRST_USER_ADMIN=' /opt/opengym/.env || echo "FIRST_USER_ADMIN=1"
+      } >/opt/opengym_data/.env
+      chmod 600 /opt/opengym_data/.env
+      cat <<EOF >/etc/systemd/system/opengym.service
+[Unit]
+Description=openGym API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/opengym/api
+EnvironmentFile=/opt/opengym_data/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      rm -f /etc/nginx/sites-enabled/opengym.conf /etc/nginx/sites-available/opengym.conf
+      cat <<'EOF' >/etc/nginx/sites-available/opengym
+server {
+    listen 80 default_server;
+    server_name _;
+    root /opt/opengym/frontend/dist;
+    index index.html;
+    absolute_redirect off;
+
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+
+    location ^~ /api/ {
+        client_max_body_size 5m;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location ^~ /api/media/ {
+        client_max_body_size 48m;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location / {
+        try_files $uri $uri/ @root;
+    }
+
+    location @root {
+        return 302 /$is_args$args;
+    }
+
+    location ~* \.(js|css|json|html)$ {
+        add_header Cache-Control "no-cache, must-revalidate";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    }
+
+    location ^~ /exercise-media/ {
+        alias /opt/opengym/catalogue/media/;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    }
+
+    location ~* \.(png|jpg|jpeg|gif|ico|svg|woff|woff2|webp|avif|mp4)$ {
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "same-origin" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    }
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript image/svg+xml;
+    gzip_vary on;
+    gzip_min_length 1024;
+}
+EOF
+      systemctl daemon-reload
+      nginx_enable_site "opengym"
+      rm -f /opt/opengym_version.txt /opt/opengym.env.bak
+      msg_ok "Migrated openGym (old data kept in /opt/opengym-data)"
+    fi
+
     NODE_VERSION="22" setup_nodejs
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "opengym" "DuarteSantos8/openGym" "tarball" "latest" "/opt/opengym" "" "v"
 
